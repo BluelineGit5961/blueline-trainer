@@ -1,0 +1,785 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="blueline-sop"
+echo "==> Creating project folder: $APP_DIR"
+mkdir -p "$APP_DIR"
+cd "$APP_DIR"
+
+############################################
+# 1) Standalone single-file HTML/JS player #
+############################################
+cat > standalone-player.html <<'HTML'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Blueline SOP Trainer — Standalone</title>
+<style>
+  :root { --bg:#f7fafc; --card:#fff; --ink:#0f172a; --muted:#6b7280; --accent:#2563eb; }
+  *{box-sizing:border-box} body{margin:0;background:linear-gradient(#f8fafc,#eef2f7);font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial}
+  .wrap{max-width:1000px;margin:28px auto;padding:16px}
+  .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between;background:var(--card);border:1px solid #e5e7eb;border-radius:16px;padding:12px 16px;box-shadow:0 2px 8px rgba(15,23,42,.06)}
+  .bar select,.bar button,.bar label{font-size:14px}
+  .card{background:var(--card);border:1px solid #e5e7eb;border-radius:16px;padding:16px;box-shadow:0 2px 8px rgba(15,23,42,.06)}
+  .title{font-weight:700;font-size:20px;margin:0 0 8px}
+  .step-title{font-weight:600;font-size:18px;margin:0 0 8px}
+  .prose{color:var(--ink);line-height:1.5}
+  .prose img{max-width:100%;border-radius:12px}
+  .prose figure{border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;margin:0}
+  .prose figcaption{font-size:12px;color:var(--muted);padding:6px 10px}
+  .grid{display:grid;gap:12px}
+  @media(min-width:700px){.grid-2{grid-template-columns:1fr 1fr}}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .btn{padding:8px 12px;border:1px solid #d1d5db;border-radius:10px;background:#fff;cursor:pointer}
+  .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .btn[disabled]{opacity:.5;cursor:not-allowed}
+  .progress{height:8px;background:#e5e7eb;border-radius:999px;overflow:hidden;width:220px}
+  .progress>div{height:100%;background:var(--accent);width:0}
+  .steps ol{margin:0;padding-left:20px}
+  .steps li{cursor:pointer}
+  .muted{color:var(--muted);font-size:13px}
+  .sr-only{position:absolute;left:-9999px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <div class="controls">
+      <strong>SOP Trainer</strong>
+      <span class="muted">Standalone • Multi‑program • i18n • Browser TTS</span>
+    </div>
+    <div class="controls">
+      <label class="sr-only" for="program">Program</label>
+      <select id="program"></select>
+      <label class="sr-only" for="lang">Language</label>
+      <select id="lang"></select>
+      <label class="btn" style="margin-left:4px;display:inline-flex;align-items:center;gap:6px;cursor:pointer">
+        <span>Upload JSON</span>
+        <input id="jsonfile" type="file" accept="application/json" class="sr-only">
+      </label>
+      <label style="display:inline-flex;gap:6px;align-items:center;margin-left:6px;font-size:13px">
+        <input id="autotts" type="checkbox"> Auto‑speak
+      </label>
+    </div>
+  </div>
+
+  <div id="main" class="grid" style="margin-top:12px">
+    <div class="card">
+      <h2 id="stepTitle" class="step-title"></h2>
+      <div id="stepHtml" class="prose"></div>
+      <div id="stepImages" class="grid grid-2" style="margin-top:10px"></div>
+      <div id="stepPrompt" class="muted" style="margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <div class="controls" style="justify-content:space-between">
+        <div class="controls">
+          <button id="back" class="btn">← Back</button>
+          <button id="repeat" class="btn">Repeat 🔊</button>
+          <button id="mic" class="btn">🎤 Mic</button>
+        </div>
+        <div class="controls">
+          <div class="progress" aria-label="progress"><div id="bar"></div></div>
+          <button id="next" class="btn primary">Next →</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card steps">
+      <h3 class="title" style="font-size:16px">Steps</h3>
+      <ol id="outline" class="grid grid-2"></ol>
+    </div>
+
+    <div id="completion" class="card" style="display:none">
+      <h3 class="title">Training Complete 🎓</h3>
+      <p class="muted">Please complete the form below to confirm training completion.</p>
+      <iframe id="jotform" title="Completion Form" style="width:100%;height:640px;border:1px solid #e5e7eb;border-radius:12px"></iframe>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---------- Minimal schema (same as the React prototype) ----------
+{
+  "programId": "hobart-ironer-1",
+  "title": "Blueline Ironer 1 SOP Trainer",
+  "languages": ["en","pt"],
+  "steps": [{
+    "title": {"en":"Step 1","pt":"Passo 1"},
+    "html": {"en":"<p>...</p>","pt":"<p>...</p>"},
+    "speak":{"en":"Welcome","pt":"Bem-vindo"},
+    "prompts":{"en":["Say 'next'"],"pt":["Diga 'próximo'"]},
+    "images":[{"src":"https://.../front.png","alt":{"en":"Front","pt":"Frente"}}]
+  }],
+  "completion":{"jotformUrl":"https://form.jotform.com/251048843614053"}
+}
+------------------------------------------------------------------- */
+
+const sample = {
+  programId: "hobart-ironer-1",
+  title: "Blueline Ironer 1 SOP Trainer",
+  languages: ["en","pt"],
+  steps: [
+    {
+      title: {en:"Step 1: Introduction", pt:"Passo 1: Introdução"},
+      html: {
+        en: `<p>This SOP describes safe and efficient operation of the <strong>Hobart Gas Ironer 1</strong>.</p>
+             <p>It supports <strong>ISO 14001</strong> and <strong>ISO 9001</strong>.</p>`,
+        pt: `<p>Este POP descreve a operação segura e eficiente da <strong>Hobart Gas Ironer 1</strong>.</p>
+             <p>Suporta <strong>ISO 14001</strong> e <strong>ISO 9001</strong>.</p>`
+      },
+      speak: {en:"Welcome! Are you ready to begin?", pt:"Bem‑vindo! Vamos começar?"},
+      prompts: {en:["Say 'next' when you're ready."], pt:["Diga 'próximo' para continuar."]},
+      images: [{src:"https://blueline-trainer-frontend.onrender.com/hob-ironer1/hobironer1front.png",alt:{en:"Front view",pt:"Vista frontal"}}]
+    },
+    {
+      title: {en:"Step 2: PPE and Safety", pt:"Passo 2: EPI e Segurança"},
+      html: {
+        en: <ul><li>No loose clothing</li><li>No jewellery</li><li>Hair tied back</li></ul>,
+        pt: <ul><li>Sem roupas largas</li><li>Sem joias</li><li>Cabelo preso</li></ul>
+      },
+      speak: {en:"Check your PPE before using the ironer.", pt:"Verifique os EPIs antes de usar a calandra."},
+      prompts: {en:["Say 'next' to continue."], pt:["Diga 'próximo' para continuar."]}
+    }
+  ],
+  completion:{jotformUrl:"https://form.jotform.com/251048843614053"}
+};
+
+const $ = sel => document.querySelector(sel);
+const programSel = $("#program");
+const langSel = $("#lang");
+const jsonInput = $("#jsonfile");
+const bar = $("#bar");
+const stepTitle = $("#stepTitle");
+const stepHtml = $("#stepHtml");
+const stepImages = $("#stepImages");
+const stepPrompt = $("#stepPrompt");
+const nextBtn = $("#next");
+const backBtn = $("#back");
+const repeatBtn = $("#repeat");
+const micBtn = $("#mic");
+const completion = $("#completion");
+const jotform = $("#jotform");
+const outline = $("#outline");
+const autoTTS = $("#autotts");
+
+let programs = [sample];
+let pid = sample.programId;
+let lang = "en";
+let idx = 0;
+
+function pickProgram() {
+  return programs.find(p => p.programId === pid) || programs[0];
+}
+function langs() {
+  const p = pickProgram();
+  return (p.languages && p.languages.length) ? p.languages : ["en"];
+}
+function speakText(text) {
+  if (!("speechSynthesis" in window)) return;
+  window.speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance(text);
+  const pickVoice = () => {
+    const voices = window.speechSynthesis.getVoices();
+    const map = {en:"en-AU",pt:"pt-PT",es:"es-ES"};
+    const want = map[lang] || "en-AU";
+    return voices.find(v => v.lang?.toLowerCase().startsWith(want.toLowerCase())) || voices[0];
+  };
+  const v = pickVoice();
+  if (v) utter.voice = v;
+  window.speechSynthesis.speak(utter);
+}
+function stripHtml(html="") {
+  const div = document.createElement("div"); div.innerHTML = html;
+  // remove figcaptions from speak
+  div.querySelectorAll("figcaption,.caption").forEach(n=>n.remove());
+  return div.textContent || div.innerText || "";
+}
+function renderStep() {
+  const p = pickProgram();
+  const steps = p.steps || [];
+  const done = idx >= steps.length;
+  // completion screen
+  completion.style.display = done ? "block" : "none";
+  if (done) {
+    stepTitle.textContent = "";
+    stepHtml.innerHTML = "";
+    stepImages.innerHTML = "";
+    stepPrompt.textContent = "";
+    jotform.src = p.completion?.jotformUrl || "";
+    bar.style.width = "100%";
+    return;
+  }
+  const s = steps[idx];
+  stepTitle.textContent = s.title?.[lang] || s.title?.en || Step ${idx+1};
+  stepHtml.innerHTML = s.html?.[lang] || s.html?.en || "";
+  stepImages.innerHTML = (Array.isArray(s.images)? s.images:[]).map(im => `
+    <figure><img src="${im.src}" loading="lazy" alt="${(im.alt?.[lang]||im.alt?.en||'')}" />
+      <figcaption>${im.alt?.[lang]||im.alt?.en||''}</figcaption>
+    </figure>`).join("");
+  const prompt = Array.isArray(s.prompts?.[lang]) && s.prompts[lang][0] ? s.prompts[lang][0] : "";
+  stepPrompt.textContent = prompt;
+  const pct = steps.length ? ((idx+1)/steps.length)*100 : 0;
+  bar.style.width = pct + "%";
+  // outline
+  outline.innerHTML = steps.map((st,i)=><li data-i="${i}" style="${i===idx?'font-weight:600':''}">${st.title?.[lang]||st.title?.en||('Step '+(i+1))}</li>).join("");
+  outline.querySelectorAll("li").forEach(li => li.onclick = () => { idx = Number(li.dataset.i); renderStep(); });
+  if (autoTTS.checked) speakText( s.speak?.[lang] || stripHtml(s.html?.[lang] || s.html?.en || "") );
+}
+function populateSelectors() {
+  // programs
+  programSel.innerHTML = programs.map(p=><option value="${p.programId}">${p.title}</option>).join("");
+  programSel.value = pid;
+  // langs
+  const ls = langs();
+  langSel.innerHTML = ls.map(l=><option value="${l}">${({"en":"English","pt":"Português","es":"Español"})[l]||l.toUpperCase()}</option>).join("");
+  if (!ls.includes(lang)) lang = ls[0]; langSel.value = lang;
+}
+programSel.onchange = () => { pid = programSel.value; idx=0; populateSelectors(); renderStep(); saveState(); };
+langSel.onchange = () => { lang = langSel.value; renderStep(); saveState(); };
+jsonInput.onchange = ev => {
+  const f = ev.target.files?.[0]; if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      const arr = Array.isArray(data) ? data : [data];
+      const map = new Map(programs.map(p=>[p.programId,p]));
+      arr.forEach(p => { if (p?.programId) map.set(p.programId,p); });
+      programs = Array.from(map.values());
+      pid = programs[programs.length-1].programId; idx=0;
+      populateSelectors(); renderStep(); saveState();
+      alert("Program(s) loaded.");
+    } catch(e) { alert("Invalid JSON."); }
+  };
+  reader.readAsText(f);
+};
+nextBtn.onclick = () => { const p = pickProgram(); const n = (p.steps||[]).length; idx = Math.min(idx+1,n); renderStep(); saveState(); };
+backBtn.onclick = () => { idx = Math.max(idx-1,0); renderStep(); saveState(); };
+repeatBtn.onclick = () => {
+  const p = pickProgram(); const s = (p.steps||[])[idx]; if (!s) return;
+  speakText( s.speak?.[lang] || stripHtml(s.html?.[lang] || s.html?.en || "") );
+};
+micBtn.onclick = () => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { alert("SpeechRecognition not supported in this browser."); return; }
+  const r = new SR();
+  const map = {en:"en-AU",pt:"pt-PT",es:"es-ES"};
+  r.lang = (map[lang]||"en-AU");
+  r.interimResults = false; r.maxAlternatives = 1;
+  r.onresult = e => {
+    const t = e.results?.[0]?.[0]?.transcript?.toLowerCase() || "";
+    if (/(next|continue|proceed|ok|okay|let's go|próximo|siguiente)/.test(t)) nextBtn.click();
+    else if (/(repeat|again|repetir)/.test(t)) repeatBtn.click();
+    else speakText("Sorry, say next or repeat.");
+  };
+  r.start();
+};
+function saveState() {
+  localStorage.setItem("sop_state", JSON.stringify({pid,lang,idx,auto:autoTTS.checked}));
+}
+function loadState() {
+  try { const s = JSON.parse(localStorage.getItem("sop_state")||"{}");
+    if (s.pid) pid=s.pid; if (s.lang) lang=s.lang; if (Number.isFinite(s.idx)) idx=s.idx;
+    autoTTS.checked = !!s.auto;
+  } catch {}
+}
+window.addEventListener("load", () => { loadState(); populateSelectors(); renderStep(); });
+</script>
+</body>
+</html>
+HTML
+echo "✅ Wrote standalone-player.html"
+
+###############################################################
+# 2) Next.js + Tailwind + Supabase scaffold with Admin editor #
+###############################################################
+echo "==> Initialising Next.js app (this may take a minute)"
+npm create next-app@latest web -- --typescript --tailwind --eslint --app --src-dir --import-alias "@/*" >/dev/null 2>&1
+
+cd web
+
+echo "==> Installing deps"
+npm i @supabase/supabase-js zod react-hook-form slugify
+
+# Tailwind base polish (already installed by the generator)
+# Add environment templates
+cat > .env.local.example <<'ENV'
+# Supabase Project (https://app.supabase.com)
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR-PROJECT.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_ANON_KEY
+
+# Admin API uses service-role on the server only (do NOT expose publicly)
+SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY
+ENV
+
+# Supabase helper
+mkdir -p src/lib
+cat > src/lib/supabaseClient.ts <<'TS'
+"use client";
+import { createClient } from "@supabase/supabase-js";
+
+export const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+  { auth: { persistSession: false } }
+);
+TS
+
+cat > src/lib/supabaseAdmin.ts <<'TS'
+import { createClient } from "@supabase/supabase-js";
+
+export const supabaseAdmin = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { persistSession: false } }
+);
+TS
+
+# DB schema
+cat > supabase_schema.sql <<'SQL'
+-- Programs (multi-org ready via org_id if needed later)
+create table if not exists programs (
+  id uuid primary key default gen_random_uuid(),
+  slug text unique not null,
+  title text not null,
+  languages text[] not null default array['en'],
+  completion_jotform_url text,
+  created_at timestamp with time zone default now()
+);
+
+-- Steps (order by idx)
+create table if not exists program_steps (
+  id uuid primary key default gen_random_uuid(),
+  program_id uuid references programs(id) on delete cascade not null,
+  idx int not null,
+  title_json jsonb not null default '{}'::jsonb,
+  html_json jsonb not null default '{}'::jsonb,
+  speak_json jsonb not null default '{}'::jsonb,
+  prompts_json jsonb not null default '{}'::jsonb,
+  created_at timestamp with time zone default now()
+);
+
+-- Assets (optional)
+create table if not exists assets (
+  id uuid primary key default gen_random_uuid(),
+  program_id uuid references programs(id) on delete cascade,
+  step_id uuid references program_steps(id) on delete set null,
+  url text not null,
+  alt_json jsonb not null default '{}'::jsonb,
+  created_at timestamp with time zone default now()
+);
+
+-- Helpful index
+create index if not exists idx_steps_program on program_steps(program_id, idx);
+SQL
+
+# App routes: Player and Admin
+mkdir -p src/app/(public)/p/[slug]
+cat > src/app/(public)/p/[slug]/page.tsx <<'TSX'
+import { supabase } from "@/lib/supabaseClient";
+
+type Step = {
+  idx: number;
+  title_json: Record<string,string>;
+  html_json: Record<string,string>;
+  speak_json: Record<string,string>;
+  prompts_json: Record<string,string[]>;
+};
+type Program = {
+  id: string;
+  slug: string;
+  title: string;
+  languages: string[];
+  completion_jotform_url: string | null;
+};
+
+export default async function Player({ params }: { params: { slug: string }}) {
+  // Using RLS-safe anon client because this is public content
+  const { data: program } = await supabase
+    .from("programs")
+    .select("*")
+    .eq("slug", params.slug)
+    .single();
+
+  if (!program) return <div className="p-6">Program not found.</div>;
+
+  const { data: steps } = await supabase
+    .from("program_steps")
+    .select("*")
+    .eq("program_id", program.id)
+    .order("idx",{ascending:true});
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-4">
+      <div className="max-w-5xl mx-auto space-y-4">
+        <header className="p-4 bg-white rounded-2xl shadow flex items-center justify-between">
+          <div>
+            <h1 className="font-semibold text-xl">{program.title}</h1>
+            <p className="text-sm text-slate-500">Languages: {program.languages.join(", ")}</p>
+          </div>
+        </header>
+        <PlayerClient program={program} steps={steps||[]} />
+      </div>
+    </div>
+  );
+}
+
+"use client";
+import React from "react";
+function PlayerClient({ program, steps }: { program: Program; steps: Step[] }) {
+  const [lang,setLang] = React.useState(program.languages[0]||"en");
+  const [i,setI] = React.useState(0);
+  const s = steps[i]; const done = i>=steps.length;
+
+  React.useEffect(()=>{
+    if (done) return;
+    const speak = s?.speak_json?.[lang] || s?.speak_json?.["en"] || strip(s?.html_json?.[lang] || s?.html_json?.["en"] || "");
+    if (speak && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(speak);
+      const want = {en:"en-AU",pt:"pt-PT",es:"es-ES"}[lang] || "en-AU";
+      const v = window.speechSynthesis.getVoices().find(v=>v.lang?.toLowerCase().startsWith(want.toLowerCase()));
+      if (v) u.voice = v;
+      window.speechSynthesis.speak(u);
+    }
+  },[i,lang]);
+
+  return (
+    <div className="space-y-4">
+      <div className="p-4 bg-white rounded-2xl shadow flex items-center gap-3">
+        <select className="border rounded-lg px-3 py-2" value={lang} onChange={e=>setLang(e.target.value)}>
+          {(program.languages||["en"]).map((l:string)=><option key={l} value={l}>{l.toUpperCase()}</option>)}
+        </select>
+        <div className="ml-auto flex items-center gap-3">
+          <Progress value={steps.length? ((Math.min(i+1,steps.length))/steps.length)*100 : 0} />
+          <button className="px-4 py-2 rounded-xl border" disabled={i===0} onClick={()=>setI(Math.max(i-1,0))}>← Back</button>
+          <button className="px-4 py-2 rounded-xl bg-blue-600 text-white disabled:opacity-50"
+            disabled={i>=steps.length-1} onClick={()=>setI(Math.min(i+1,steps.length-1))}>Next →</button>
+        </div>
+      </div>
+
+      {!done ? (
+        <div className="p-4 bg-white rounded-2xl shadow">
+          <h3 className="font-semibold text-lg mb-2">{s?.title_json?.[lang] || s?.title_json?.en || Step ${i+1}}</h3>
+          <div className="prose max-w-none" dangerouslySetInnerHTML={{__html: s?.html_json?.[lang] || s?.html_json?.en || ""}} />
+          {Array.isArray(s?.prompts_json?.[lang]) && s.prompts_json[lang][0] &&
+            <div className="mt-3 text-sm text-slate-600">{s.prompts_json[lang][0]}</div>}
+        </div>
+      ) : (
+        <div className="p-4 bg-white rounded-2xl shadow">
+          <h3 className="font-semibold text-lg mb-2">Training Complete 🎓</h3>
+          {program.completion_jotform_url
+            ? <iframe className="w-full h-[640px] border rounded-xl" src={program.completion_jotform_url} />
+            : <p className="text-sm text-slate-600">No completion form configured.</p>}
+        </div>
+      )}
+
+      <div className="p-4 bg-white rounded-2xl shadow">
+        <h4 className="font-semibold mb-3">Steps</h4>
+        <ol className="grid md:grid-cols-2 gap-3 list-decimal ml-6">
+          {steps.map((st,idx)=>
+            <li key={idx} className={cursor-pointer ${idx===i?'font-semibold':''}} onClick={()=>setI(idx)}>
+              {st.title_json?.[lang] || st.title_json?.en || Step ${idx+1}}
+            </li>
+          )}
+        </ol>
+      </div>
+    </div>
+  );
+}
+function strip(html=""){ const d=document.createElement("div"); d.innerHTML=html; d.querySelectorAll("figcaption,.caption").forEach(n=>n.remove()); return d.textContent||""; }
+function Progress({value=0}:{value:number}){ return <div className="w-56 h-2 bg-gray-200 rounded-full overflow-hidden"><div className="h-full bg-blue-600" style={{width:${value}%}}/></div> }
+TSX
+
+# Admin list/create/edit (very simple forms)
+mkdir -p src/app/admin/programs
+cat > src/app/admin/programs/page.tsx <<'TSX'
+import Link from "next/link";
+import { supabase } from "@/lib/supabaseClient";
+
+export default async function AdminPrograms() {
+  const { data: programs } = await supabase.from("programs").select("*").order("created_at",{ascending:false});
+  return (
+    <div className="min-h-screen bg-slate-50 p-6">
+      <div className="max-w-5xl mx-auto space-y-4">
+        <div className="flex items-center justify-between">
+          <h1 className="text-xl font-semibold">Programs</h1>
+          <Link className="px-3 py-2 rounded-lg bg-blue-600 text-white" href="/admin/programs/new">New Program</Link>
+        </div>
+        <ul className="space-y-2">
+          {(programs||[]).map(p=>(
+            <li key={p.id} className="p-3 bg-white rounded-xl border flex items-center justify-between">
+              <div>
+                <div className="font-medium">{p.title}</div>
+                <div className="text-sm text-slate-500">{p.slug} • {p.languages.join(", ")}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Link className="px-3 py-2 rounded-lg border" href={/p/${p.slug}} target="_blank">Open Player</Link>
+                <Link className="px-3 py-2 rounded-lg border" href={/admin/programs/${p.id}}>Edit</Link>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+TSX
+
+mkdir -p src/app/admin/programs/new
+cat > src/app/admin/programs/new/page.tsx <<'TSX'
+"use client";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
+import slugify from "slugify";
+
+const schema = z.object({
+  title: z.string().min(2),
+  slug: z.string().min(2),
+  languages: z.string().default("en"),
+  completion_jotform_url: z.string().optional(),
+});
+
+export default function NewProgram() {
+  const { register, handleSubmit, watch, setValue } = useForm({ defaultValues: { title:"", slug:"", languages:"en", completion_jotform_url:"" }});
+  const title = watch("title");
+  React.useEffect(()=>{ setValue("slug", slugify(title||"", {lower:true,strict:true})); },[title]);
+
+  async function onSubmit(values:any){
+    const res = await fetch("/api/admin/programs",{ method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({
+      ...values, languages: values.languages.split(",").map((s:string)=>s.trim()).filter(Boolean)
+    })});
+    if(!res.ok){ alert("Failed to create."); return; }
+    const p = await res.json(); window.location.href = /admin/programs/${p.id};
+  }
+  return (
+    <div className="min-h-screen bg-slate-50 p-6">
+      <form onSubmit={handleSubmit(onSubmit)} className="max-w-2xl mx-auto bg-white p-4 rounded-2xl space-y-3">
+        <h1 className="text-xl font-semibold">New Program</h1>
+        <input className="border p-2 rounded w-full" placeholder="Title" {...register("title")}/>
+        <input className="border p-2 rounded w-full" placeholder="slug" {...register("slug")}/>
+        <input className="border p-2 rounded w-full" placeholder="Languages (comma separated, e.g. en,pt,es)" {...register("languages")}/>
+        <input className="border p-2 rounded w-full" placeholder="Jotform URL (optional)" {...register("completion_jotform_url")}/>
+        <button className="px-4 py-2 rounded bg-blue-600 text-white" type="submit">Create</button>
+      </form>
+    </div>
+  );
+}
+TSX
+
+mkdir -p src/app/admin/programs/[id]
+cat > src/app/admin/programs/[id]/page.tsx <<'TSX'
+import { supabase } from "@/lib/supabaseClient";
+import EditorClient from "./stepEditor";
+
+export default async function EditProgram({ params }:{ params:{ id:string }}) {
+  const { data: program } = await supabase.from("programs").select("*").eq("id", params.id).single();
+  const { data: steps } = await supabase.from("program_steps").select("*").eq("program_id", params.id).order("idx",{ascending:true});
+  if(!program) return <div className="p-6">Not found.</div>;
+  return <EditorClient program={program} steps={steps||[]} />;
+}
+TSX
+
+cat > src/app/admin/programs/[id]/stepEditor.tsx <<'TSX'
+"use client";
+import React from "react";
+
+export default function EditorClient({ program, steps }:{ program:any; steps:any[] }) {
+  const [local,setLocal] = React.useState(steps);
+
+  async function addStep(){
+    const idx = local.length;
+    const res = await fetch("/api/admin/steps",{ method:"POST", headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ program_id: program.id, idx, title_json:{en:Step ${idx+1}}, html_json:{en:"<p>New step</p>"}, speak_json:{en:"New step"}, prompts_json:{en:["Say 'next'"]} })
+    });
+    if(!res.ok) return alert("Failed to add step");
+    const s = await res.json(); setLocal([...local, s]);
+  }
+  async function saveStep(s:any){
+    const res = await fetch(/api/admin/steps/${s.id},{ method:"PUT", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(s) });
+    if(!res.ok) return alert("Save failed");
+  }
+  async function reorder(from:number,to:number){
+    if(to<0||to>=local.length) return;
+    const arr=[...local]; const [m]=arr.splice(from,1); arr.splice(to,0,m);
+    // persist simple reindex
+    await fetch(/api/admin/steps/reindex,{ method:"POST", headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ ids: arr.map((s,i)=>({id:s.id,idx:i})) })
+    });
+    setLocal(arr);
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-6 space-y-4">
+      <header className="max-w-5xl mx-auto flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-semibold">{program.title}</h1>
+          <p className="text-sm text-slate-500">{program.slug}</p>
+        </div>
+        <a className="px-3 py-2 rounded-lg border" target="_blank" href={/p/${program.slug}}>Open Player</a>
+      </header>
+      <div className="max-w-5xl mx-auto space-y-3">
+        {local.map((s:any,i:number)=>(
+          <div key={s.id} className="bg-white p-4 rounded-xl border space-y-2">
+            <div className="flex items-center justify-between">
+              <strong>Step {i+1}</strong>
+              <div className="flex gap-2">
+                <button className="px-2 py-1 border rounded" onClick={()=>reorder(i,i-1)}>↑</button>
+                <button className="px-2 py-1 border rounded" onClick={()=>reorder(i,i+1)}>↓</button>
+              </div>
+            </div>
+            <input className="border p-2 rounded w-full" value={s.title_json?.en||""}
+              onChange={e=>setLocal(prev=>prev.map(x=>x.id===s.id?{...x,title_json:{...x.title_json,en:e.target.value}}:x))}/>
+            <textarea className="border p-2 rounded w-full" rows={6} value={s.html_json?.en||""}
+              onChange={e=>setLocal(prev=>prev.map(x=>x.id===s.id?{...x,html_json:{...x.html_json,en:e.target.value}}:x))}/>
+            <input className="border p-2 rounded w-full" value={s.speak_json?.en||""}
+              onChange={e=>setLocal(prev=>prev.map(x=>x.id===s.id?{...x,speak_json:{...x.speak_json,en:e.target.value}}:x))}/>
+            <input className="border p-2 rounded w-full" value={(s.prompts_json?.en?.[0]||"")}
+              onChange={e=>setLocal(prev=>prev.map(x=>x.id===s.id?{...x,prompts_json:{...x.prompts_json,en:[e.target.value]}}:x))}/>
+            <button className="px-3 py-2 rounded bg-blue-600 text-white" onClick={()=>saveStep(local.find(x=>x.id===s.id))}>Save</button>
+          </div>
+        ))}
+        <button className="px-3 py-2 rounded bg-emerald-600 text-white" onClick={addStep}>+ Add Step</button>
+      </div>
+    </div>
+  );
+}
+TSX
+
+# API routes (server) using service role
+mkdir -p src/app/api/admin/programs
+cat > src/app/api/admin/programs/route.ts <<'TS'
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+export async function POST(req: Request){
+  const body = await req.json();
+  const { data, error } = await supabaseAdmin.from("programs").insert({
+    title: body.title,
+    slug: body.slug,
+    languages: body.languages || ["en"],
+    completion_jotform_url: body.completion_jotform_url || null
+  }).select("*").single();
+  if(error) return NextResponse.json({error:error.message},{status:400});
+  return NextResponse.json(data);
+}
+TS
+
+mkdir -p src/app/api/admin/steps
+cat > src/app/api/admin/steps/route.ts <<'TS'
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+export async function POST(req: Request){
+  const body = await req.json();
+  const { data, error } = await supabaseAdmin.from("program_steps").insert({
+    program_id: body.program_id,
+    idx: body.idx|0,
+    title_json: body.title_json||{},
+    html_json: body.html_json||{},
+    speak_json: body.speak_json||{},
+    prompts_json: body.prompts_json||{}
+  }).select("*").single();
+  if(error) return NextResponse.json({error:error.message},{status:400});
+  return NextResponse.json(data);
+}
+TS
+
+mkdir -p src/app/api/admin/steps/[id]
+cat > src/app/api/admin/steps/[id]/route.ts <<'TS'
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+export async function PUT(_: Request, { params }:{ params:{ id:string }}){
+  const body = await _.json();
+  const { data, error } = await supabaseAdmin.from("program_steps").update({
+    title_json: body.title_json,
+    html_json: body.html_json,
+    speak_json: body.speak_json,
+    prompts_json: body.prompts_json,
+  }).eq("id", params.id).select("*").single();
+  if(error) return NextResponse.json({error:error.message},{status:400});
+  return NextResponse.json(data);
+}
+TS
+
+mkdir -p src/app/api/admin/steps/reindex
+cat > src/app/api/admin/steps/reindex/route.ts <<'TS'
+import { NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+
+export async function POST(req: Request){
+  const { ids } = await req.json(); // [{id, idx}]
+  for (const row of ids) {
+    await supabaseAdmin.from("program_steps").update({ idx: row.idx }).eq("id", row.id);
+  }
+  return NextResponse.json({ok:true});
+}
+TS
+
+# Tailwind prose tweak
+cat > src/app/globals.css <<'CSS'
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.prose p { margin: .5rem 0; }
+.prose ul { list-style: disc; margin-left: 1rem; }
+.prose ol { list-style: decimal; margin-left: 1rem; }
+CSS
+
+# Simple home page with links
+cat > src/app/page.tsx <<'TSX'
+export default function Home() {
+  return (
+    <div className="min-h-screen bg-slate-50 p-6">
+      <div className="max-w-3xl mx-auto bg-white rounded-2xl p-6 border">
+        <h1 className="text-xl font-semibold">Blueline SOP Platform</h1>
+        <ul className="list-disc ml-5 mt-3">
+          <li><a className="text-blue-600 underline" href="/admin/programs">Admin: Programs</a></li>
+          <li><a className="text-blue-600 underline" href="/p/hobart-ironer-1">Example Player (after seeding)</a></li>
+        </ul>
+        <p className="text-sm text-slate-500 mt-3">Remember to set your Supabase env & run the SQL schema.</p>
+      </div>
+    </div>
+  );
+}
+TSX
+
+# README with quick start
+cat > README.md <<'MD'
+# Blueline SOP Platform
+
+## 1) Standalone player
+Open ../standalone-player.html in any modern browser. Click *Upload JSON* to load programs. Runs offline.
+
+## 2) Web app (Next.js + Supabase)
+1. Create a Supabase project and get:
+   - NEXT_PUBLIC_SUPABASE_URL
+   - NEXT_PUBLIC_SUPABASE_ANON_KEY
+   - SUPABASE_SERVICE_ROLE_KEY (server only)
+2. Copy .env.local.example to .env.local and fill keys.
+3. In Supabase SQL editor, paste and run supabase_schema.sql.
+4. npm run dev to start.  
+   - Admin: http://localhost:3000/admin/programs  
+   - Player: http://localhost:3000/p/<slug>
+
+### Seed a sample program
+- Create a program in Admin (“New Program”), slug like hobart-ironer-1, languages en,pt, add Jotform URL.
+- Add steps with the editor (HTML in html_json.en, speak text in speak_json.en).
+MD
+
+echo "✅ Scaffold complete."
+
+echo
+echo "Next steps:"
+echo "1) Open $(pwd)/../standalone-player.html in your browser for the single-file build."
+echo "2) cd web && cp .env.local.example .env.local  # fill in Supabase keys"
+echo "3) In Supabase, run the SQL in web/supabase_schema.sql"
+echo "4) npm run dev  # then visit http://localhost:3000/admin/programs"
+
+
+---
